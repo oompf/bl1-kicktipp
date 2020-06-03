@@ -25,4 +25,4 @@ if __name__ == "__main__":
     match_list.predict_upcoming()
 
     if "--table" in sys.argv:
-        print(match_list.elo_table)
+        print(match_list.rating)

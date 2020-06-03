@@ -278,7 +278,7 @@ class MatchList:
             match = self.matches[i]
             if match.is_finished:
                 continue
-            if cnt >= 18:
+            if cnt >= 14:
                 break
 
             cnt += 1

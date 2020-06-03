@@ -3,6 +3,7 @@ from scipy import stats
 from scipy.optimize import minimize
 import numpy as np
 import math
+import sys
 
 # Globale Konfigurationsparameter
 ELO_K = 23.5
@@ -44,7 +45,6 @@ class Match:
 
         # 3. Saison auslesen
         season = int(j["LeagueName"][-9:-5])
-
         # 4. Spielergebnis auslesen
         g1 = -1
         g2 = -1
@@ -78,7 +78,7 @@ class EloTable:
         self.elos = {}
 
     def expect(self, teams):
-        return 1 / (1 + 10**((self.elos[teams[1]] - self.elos[teams[0]]) / 500))
+        return 1 / (1 + 10**((self.elos[teams[1]] - self.elos[teams[0]]) / 400))
 
     def update(self, match):
         if not match.is_finished:
@@ -94,7 +94,7 @@ class EloTable:
     
     @staticmethod
     def optim_fct(elo, elo_array, n_aufsteiger):
-        arr = 1 / (1 + 10 ** ((elo_array - elo) / 500))
+        arr = 1 / (1 + 10 ** ((elo_array - elo) / 400))
         return abs((arr.sum() + (n_aufsteiger - 1) / 2) / (n_aufsteiger + len(arr) - 1) - AUFSTEIGER_P)
     
     def next_season(self, old_teams, new_teams):
@@ -195,6 +195,7 @@ class MatchList:
 
         curr_season = self.min_season
         s = curr_season
+        bench = 0
         for i in range(0, len(self.matches)):
             match = self.matches[i]
 
@@ -207,6 +208,19 @@ class MatchList:
                 curr_season = s
                 self.elo_table.next_season(self.teams_by_season[s - 1], self.teams_by_season[s])
             
+            # Benchmark
+            if "--bench" in sys.argv:
+                if match.season >= 2014 and match.season < 2019:
+                    e1 = self.elo_table.expect(match.teams)
+                    e2 = 1 - e1
+
+                    l1 = self.lin_regress.predict(e1) * self.home_multi * self.avg_goals[i]
+                    l2 = self.lin_regress.predict(e2) * self.away_multi * self.avg_goals[i]
+
+                    res = self.predict_kt(l1, l2)
+                    tip1, tip2 = res[1]
+                    bench += self.reward_matrices[tip1][tip2][match.result[0]][match.result[1]]
+
             # Lineare Regression trainieren
             if i >= SKIP_GAMES:
                 avg_goals = self.avg_goals[i]
@@ -222,6 +236,9 @@ class MatchList:
                 self.lin_regress.add(e2, g2 / self.away_multi)
 
             self.elo_table.update(match)
+
+        if "--bench" in sys.argv:
+            print("Benchmark: {}".format(bench))
     
     def calc_reward_matrices(self):
         N = len(self.reward_matrices)
@@ -233,11 +250,11 @@ class MatchList:
             for tip2 in range(0, N):
                 # Unentschieden
                 if tip1 == tip2:
-                    reward = np.diag(2 * np.ones(20))
+                    reward = np.diag(2 * np.ones(25))
                 else:
-                    reward = np.zeros([20, 20])
-                    for i1 in range(0, 20):
-                        for i2 in range(0, 20):
+                    reward = np.zeros([25, 25])
+                    for i1 in range(0, 25):
+                        for i2 in range(0, 25):
                             if i1 - i2 == tip1 - tip2:
                                 reward[i1][i2] = 3
                             elif ((i1 > i2) and (tip1 > tip2)) or ((i1 < i2) and (tip1 < tip2)):
@@ -247,7 +264,7 @@ class MatchList:
                 self.reward_matrices[tip1][tip2] = reward
 
     def get_poisson_vector(self, lmbda):
-        v = np.zeros(20)
+        v = np.zeros(25)
         for k in range(0, len(v)):
             v[k] = math.pow(lmbda, k) / math.factorial(k) * math.exp(-lmbda)
         return np.asmatrix(v)
@@ -270,7 +287,6 @@ class MatchList:
         tips.sort(key = lambda x : x[0])       
         return tips[-1]
 
-    
     def predict_upcoming(self):
         cnt = 0
         total_res = 0

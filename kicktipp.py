@@ -2,6 +2,7 @@
 
 import urllib.request, json, glob
 from match import Match, MatchList
+import sys
 
 if __name__ == "__main__":
     match_list = MatchList()
@@ -22,3 +23,6 @@ if __name__ == "__main__":
     # 3. Daten verarbeiten
     match_list.compute()
     match_list.predict_upcoming()
+
+    if "--table" in sys.argv:
+        print(match_list.elo_table)

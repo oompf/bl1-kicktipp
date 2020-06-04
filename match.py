@@ -7,6 +7,7 @@ import sys
 
 # Globale Konfigurationsparameter
 SKIP_GAMES = 306 * 2
+HFA = 125
 
 class Match:
     def __init__(self, teams, start_time, season, result=None):
@@ -106,16 +107,21 @@ class GlickoRating:
         rd2 = self.timeshift_rd(t2, match.start_time)
         rd = math.sqrt(rd1**2 + rd2**2)
 
-        return 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd) * (r2 - r1)))
+        return 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd) * (r2 - (r1 + HFA))))
 
-    def __train(self, t1, t2, outcome, time):
+    def __train(self, t1, t2, outcome, time, is_t1_home=True):
+        if is_t1_home:
+            hfa_boost = HFA
+        else:
+            hfa_boost = -HFA
+
         rd1 = self.timeshift_rd(t1, time)
         rd2 = self.timeshift_rd(t2, time)
 
         r1 = self.rs[t1]
         r2 = self.rs[t2]
 
-        e = 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd2) * (r2 - r1)))
+        e = 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd2) * (r2 - (r1 + hfa_boost))))
         d = ((GlickoRating.Q * self.g_func(rd2)) ** 2) * e * (1 - e)
 
         new_r1 = r1 + GlickoRating.Q / (rd1**-2 + d) * self.g_func(rd2) * (outcome - e)
@@ -130,8 +136,8 @@ class GlickoRating:
         t1, t2 = match.teams
         outcome = match.outcome
         time = match.start_time
-        self.__train(t1, t2, outcome, time)
-        self.__train(t2, t1, 1 - outcome, time)
+        self.__train(t1, t2, outcome, time, is_t1_home=True)
+        self.__train(t2, t1, 1 - outcome, time, is_t1_home=False)
         self.last_game[t1] = match.start_time
         self.last_game[t2] = match.start_time
 
@@ -154,6 +160,8 @@ class MatchList:
         self.matches = []
         self.avg_goals = []
         self.rating = GlickoRating()
+        self.home_mult = None
+        self.away_mult = None
         self.lin_regress = LinearRegression()
         self.reward_matrices = [[] for _ in range(0, 10)]
 
@@ -178,11 +186,10 @@ class MatchList:
             else:
                 self.avg_goals.append(self.avg_goals[-1])
 
-        # 3. Matrizen berechnen
+        # 4. Matrizen berechnen
         self.calc_reward_matrices()
 
-
-        # 4. Modell trainieren
+        # 5. Glicko-Modell trainieren
         bench = 0
         for i in range(0, len(self.matches)):
             match = self.matches[i]
@@ -192,7 +199,7 @@ class MatchList:
 
             # Benchmark
             if "--bench" in sys.argv:
-                if match.season >= 2014 and match.season < 2019:
+                if match.season < 2019 and match.season >= 2014:
                     e1 = self.rating.expect(match)
                     e2 = 1 - e1
 
@@ -277,10 +284,11 @@ class MatchList:
             if match.is_finished:
                 continue
 
+        
             if cnt >= 14:
                 break
-
             cnt += 1
+            
 
             e1 = self.rating.expect(match)
             e2 = 1 - e1

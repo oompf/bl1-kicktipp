@@ -6,8 +6,7 @@ import math
 import sys
 
 # Globale Konfigurationsparameter
-SKIP_GAMES = 306 * 2
-HFA = 125
+SKIP_GAMES = 306 * 5
 
 class Match:
     def __init__(self, teams, start_time, season, result=None):
@@ -66,6 +65,10 @@ class LinearRegression:
     def add(self, x, y):
         self.xs.append(x)
         self.ys.append(y)
+
+        if len(self.xs) >= SKIP_GAMES:
+            self.xs = self.xs[-SKIP_GAMES:]
+            self.ys = self.ys[-SKIP_GAMES:]
     
     def predict(self, x):
         slope, intercept, _, _, _ = stats.linregress(self.xs, self.ys)
@@ -96,7 +99,7 @@ class GlickoRating:
         new_rd = math.sqrt(old_rd ** 2 + time_delta * GlickoRating.C ** 2)
         return min(350, new_rd)
 
-    def expect(self, match):
+    def expect(self, match, hfa):
         self.add_non_existing(match)
         
         t1, t2 = match.teams
@@ -107,37 +110,35 @@ class GlickoRating:
         rd2 = self.timeshift_rd(t2, match.start_time)
         rd = math.sqrt(rd1**2 + rd2**2)
 
-        return 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd) * (r2 - (r1 + HFA))))
+        return 1 / (1 + math.exp(GlickoRating.Q * (hfa + self.g_func(rd) * (r2 - r1))))
 
-    def __train(self, t1, t2, outcome, time, is_t1_home=True):
-        if is_t1_home:
-            hfa_boost = HFA
-        else:
-            hfa_boost = -HFA
-
+    def __train(self, t1, t2, outcome, time, hfa):
         rd1 = self.timeshift_rd(t1, time)
         rd2 = self.timeshift_rd(t2, time)
 
         r1 = self.rs[t1]
         r2 = self.rs[t2]
 
-        e = 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd2) * (r2 - (r1 + hfa_boost))))
-        d = ((GlickoRating.Q * self.g_func(rd2)) ** 2) * e * (1 - e)
+        g = self.g_func(rd2)
 
-        new_r1 = r1 + GlickoRating.Q / (rd1**-2 + d) * self.g_func(rd2) * (outcome - e)
+        e = 1 / (1 + math.exp(GlickoRating.Q * (hfa + g * (r2 - r1))))
+        d = ((GlickoRating.Q * g) ** 2) * e * (1 - e)
+
+        new_r1 = r1 + GlickoRating.Q / (rd1**-2 + d) * g * (outcome - e)
         new_rd1 = (rd1**-2 + d) ** (-0.5)
 
         self.rs[t1] = new_r1
         self.rds[t1] = new_rd1
 
-    def update(self, match):
+    def update(self, match, hfa):
         self.add_non_existing(match)
 
         t1, t2 = match.teams
+
         outcome = match.outcome
         time = match.start_time
-        self.__train(t1, t2, outcome, time, is_t1_home=True)
-        self.__train(t2, t1, 1 - outcome, time, is_t1_home=False)
+        self.__train(t1, t2, outcome, time, hfa)
+        self.__train(t2, t1, 1 - outcome, time, -hfa)
         self.last_game[t1] = match.start_time
         self.last_game[t2] = match.start_time
 
@@ -148,7 +149,7 @@ class GlickoRating:
         lst = []
         for k in self.rds.keys():
             lst.append((self.rs[k], self.timeshift_rd(k, datetime.datetime.now(datetime.timezone.utc)), k))
-        lst.sort(reverse=True)
+        lst.sort(key=lambda l : l[1])
 
         t = ""
         for l in lst:
@@ -159,11 +160,11 @@ class MatchList:
     def __init__(self):
         self.matches = []
         self.avg_goals = []
+        self.home_advs = []
         self.rating = GlickoRating()
-        self.home_mult = None
-        self.away_mult = None
-        self.lin_regress = LinearRegression()
-        self.reward_matrices = [[] for _ in range(0, 10)]
+        self.l1_predictor = LinearRegression()
+        self.l2_predictor = LinearRegression()
+        self.reward_matrices = [[] for _ in range(0, 5)]
 
     def append(self, match):
         self.matches.append(match)
@@ -172,25 +173,47 @@ class MatchList:
         # 1. Liste der Spiele chronologisch sortieren
         self.matches.sort(key = lambda m : m.start_time)
 
-        # 2. Durchschnittliche erwartete Torzahl pro Spiel bestimmen
+        # 2. Heimvorteil berechnen
+        #finished_matches = list(filter(lambda m : m.is_finished, self.matches))
+        #home_factor = sum(map(lambda m : m.outcome, finished_matches)) / len(finished_matches)
+        #self.home_adv = math.log(1 / home_factor - 1) / GlickoRating.Q
+
+        # 3. Durchschnittliche erwartete Torzahl und Heimvorteil pro Spiel bestimmen
+        home_factors = []
+
         goal_sum = sum(map(lambda m : m.goal_sum(), self.matches[0:SKIP_GAMES]))  
+        home_sum = sum(map(lambda m : m.outcome, self.matches[0:SKIP_GAMES]))
 
         for i in range(0, SKIP_GAMES):
             self.avg_goals.append(goal_sum / SKIP_GAMES)
+            home_factors.append(home_sum / SKIP_GAMES)
 
         for i in range(SKIP_GAMES, len(self.matches)):
             if self.matches[i].is_finished:
                 goal_sum -= self.matches[i-SKIP_GAMES].goal_sum()
                 goal_sum += self.matches[i].goal_sum()
+                home_sum -= self.matches[i-SKIP_GAMES].outcome
+                home_sum += self.matches[i].outcome
                 self.avg_goals.append(goal_sum / SKIP_GAMES)
+                home_factors.append(home_sum / SKIP_GAMES)
             else:
                 self.avg_goals.append(self.avg_goals[-1])
+                home_factors.append(home_factors[-1])
+        
+        for h_factor in home_factors:
+            self.home_advs.append(math.log(1 / h_factor - 1) / GlickoRating.Q)
 
-        # 4. Matrizen berechnen
+
+        # 5. Matrizen berechnen
         self.calc_reward_matrices()
 
-        # 5. Glicko-Modell trainieren
+        # 6. Glicko-Modell trainieren
         bench = 0
+        var = 0
+        l1_diff = 0
+        l2_diff = 0
+        n = 0
+        ee = 0
         for i in range(0, len(self.matches)):
             match = self.matches[i]
 
@@ -199,12 +222,19 @@ class MatchList:
 
             # Benchmark
             if "--bench" in sys.argv:
-                if match.season < 2019 and match.season >= 2014:
-                    e1 = self.rating.expect(match)
+                if match.season < 2019 and match.season >= 2009:
+                    e1 = self.rating.expect(match, self.home_advs[i])
+                    var += (e1 -  match.outcome)**2
+                    n += 1
                     e2 = 1 - e1
 
-                    l1 = self.lin_regress.predict(e1) * self.avg_goals[i]
-                    l2 = self.lin_regress.predict(e2) * self.avg_goals[i]
+                    ee += self.rating.rs[match.teams[0]] - self.rating.rs[match.teams[1]]
+
+                    l1 = self.l1_predictor.predict(e1) * self.avg_goals[i]
+                    l2 = self.l2_predictor.predict(e2) * self.avg_goals[i]
+
+                    l1_diff += (match.result[0] - l1)
+                    l2_diff += (match.result[1] - l2)
 
                     res = self.predict_kt(l1, l2)
                     tip1, tip2 = res[1]
@@ -212,22 +242,24 @@ class MatchList:
 
             # Lineare Regression trainieren
             if i >= SKIP_GAMES:
-                avg_goals = self.avg_goals[i]
+                avg_g = self.avg_goals[i]
 
                 g1, g2 = match.result
-                g1 = g1 / avg_goals
-                g2 = g2 / avg_goals
+                g1 = g1 / avg_g
+                g2 = g2 / avg_g
 
-                e1 = self.rating.expect(match)
+                e1 = self.rating.expect(match, self.home_advs[i])
                 e2 = 1 - e1
                 
-                self.lin_regress.add(e1, g1)
-                self.lin_regress.add(e2, g2)
+                self.l1_predictor.add(e1, g1)
+                self.l2_predictor.add(e2, g2)
 
-            self.rating.update(match)
+            self.rating.update(match, self.home_advs[i])
         if "--bench" in sys.argv:
             print("Benchmark: {}".format(bench))
-            
+            print("Glick-Predict: {:10.5f}".format(var / n))
+            print("Goal-Predict: {:10.5f} {:10.5f}".format(l1_diff / n, l2_diff / n))
+            print("r-diff: {:10.5f}".format(ee / n))
     
     def calc_reward_matrices(self):
         N = len(self.reward_matrices)
@@ -239,11 +271,11 @@ class MatchList:
             for tip2 in range(0, N):
                 # Unentschieden
                 if tip1 == tip2:
-                    reward = np.diag(2 * np.ones(25))
+                    reward = np.diag(2 * np.ones(11))
                 else:
-                    reward = np.zeros([25, 25])
-                    for i1 in range(0, 25):
-                        for i2 in range(0, 25):
+                    reward = np.zeros([11, 11])
+                    for i1 in range(0, 11):
+                        for i2 in range(0, 11):
                             if i1 - i2 == tip1 - tip2:
                                 reward[i1][i2] = 3
                             elif ((i1 > i2) and (tip1 > tip2)) or ((i1 < i2) and (tip1 < tip2)):
@@ -253,7 +285,7 @@ class MatchList:
                 self.reward_matrices[tip1][tip2] = reward
 
     def get_poisson_vector(self, lmbda):
-        v = np.zeros(25)
+        v = np.zeros(11)
         for k in range(0, len(v)):
             v[k] = math.pow(lmbda, k) / math.factorial(k) * math.exp(-lmbda)
         return np.asmatrix(v)
@@ -270,8 +302,8 @@ class MatchList:
         for tip1 in range(0, N):
             for tip2 in range(0, N):
                 reward_matrix = self.reward_matrices[tip1][tip2]
-
                 expected = np.sum(np.multiply(prob_matrix, reward_matrix))
+
                 tips.append((expected, (tip1, tip2)))
         tips.sort(key = lambda x : x[0])       
         return tips[-1]
@@ -290,13 +322,13 @@ class MatchList:
             cnt += 1
             
 
-            e1 = self.rating.expect(match)
+            e1 = self.rating.expect(match, self.home_advs[i])
             e2 = 1 - e1
 
             t1, t2 = match.teams
 
-            l1 = self.lin_regress.predict(e1) * self.avg_goals[i]
-            l2 = self.lin_regress.predict(e2) * self.avg_goals[i]
+            l1 = self.l1_predictor.predict(e1) * self.avg_goals[i]
+            l2 = self.l2_predictor.predict(e2) * self.avg_goals[i]
 
             res = self.predict_kt(l1, l2)
             total_res += res[0]

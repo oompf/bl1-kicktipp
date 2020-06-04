@@ -7,7 +7,7 @@ import sys
 
 # Globale Konfigurationsparameter
 SKIP_GAMES = 306 * 2
-HFA = 125
+HFA = 125 * math.log(10) / 400
 
 class Match:
     def __init__(self, teams, start_time, season, result=None):
@@ -74,27 +74,34 @@ class LinearRegression:
 class GlickoRating:
     # Konstanten
     Q = math.log(10) / 400
-    C = 39.41
+    C = 30.41
+    TAU = 1.2
     TIME_DIV = (1 / 34) * datetime.timedelta(days=365)
 
     def __init__(self):
         self.last_game = {}
         self.rs = {}
         self.rds = {}
+        self.vols = {}
 
     def add_non_existing(self, match):
         for t in match.teams:
             if t not in self.rs:
                 self.rs[t] = 1500
                 self.rds[t] = 350
+                self.vols[t] = GlickoRating.C * GlickoRating.Q
                 self.last_game[t] = match.start_time
     
     def timeshift_rd(self, t, time):
         time_delta = (time - self.last_game[t]) / GlickoRating.TIME_DIV
 
-        old_rd = self.rds[t]
-        new_rd = math.sqrt(old_rd ** 2 + time_delta * GlickoRating.C ** 2)
-        return min(350, new_rd)
+        rd = self.rds[t]
+        phi = rd * GlickoRating.Q
+
+        new_phi = math.sqrt(phi ** 2 + time_delta * self.vols[t] ** 2)
+        new_rd = min(350, new_phi / GlickoRating.Q)
+
+        return new_rd
 
     def expect(self, match):
         self.add_non_existing(match)
@@ -107,28 +114,61 @@ class GlickoRating:
         rd2 = self.timeshift_rd(t2, match.start_time)
         rd = math.sqrt(rd1**2 + rd2**2)
 
-        return 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd) * (r2 - (r1 + HFA))))
+        mu1 = (r1 - 1500) * GlickoRating.Q
+        mu2 = (r2 - 1500) * GlickoRating.Q
+        phi = rd * GlickoRating.Q
+
+        return 1 / (1 + math.exp(self.g_func(phi) * (mu2 - (mu1 + HFA))))
 
     def __train(self, t1, t2, outcome, time, is_t1_home=True):
+        time_delta = (time - self.last_game[t1]) / GlickoRating.TIME_DIV
+
         if is_t1_home:
             hfa_boost = HFA
         else:
             hfa_boost = -HFA
 
+        time_delta = (time - self.last_game[t1]) / GlickoRating.TIME_DIV
+
+        # Schritt 1
         rd1 = self.timeshift_rd(t1, time)
         rd2 = self.timeshift_rd(t2, time)
 
         r1 = self.rs[t1]
         r2 = self.rs[t2]
 
-        e = 1 / (1 + math.exp(GlickoRating.Q * self.g_func(rd2) * (r2 - (r1 + hfa_boost))))
-        d = ((GlickoRating.Q * self.g_func(rd2)) ** 2) * e * (1 - e)
+        mu1 = (r1 - 1500) * GlickoRating.Q
+        mu2 = (r2 - 1500) * GlickoRating.Q
 
-        new_r1 = r1 + GlickoRating.Q / (rd1**-2 + d) * self.g_func(rd2) * (outcome - e)
-        new_rd1 = (rd1**-2 + d) ** (-0.5)
+        phi1 = rd1 * GlickoRating.Q
+        phi2 = rd2 * GlickoRating.Q
+
+        vol1 = self.vols[t1]
+
+        # Schritt 2
+
+        # Schritt 2
+        e = 1 / (1 + math.exp(self.g_func(phi2) * (mu2 - (mu1 + hfa_boost))))
+        v = 1 / (self.g_func(phi2)**2 * e * (1 - e))
+
+        delta = v * self.g_func(phi2) * (outcome - e)
+
+        # Schritt 3
+        res = minimize(self.f_func, vol1, (delta, phi1, v, vol1)) #, tol=1e-6)
+
+        new_vol1 = res.x[0]
+
+        new_phi1 = math.sqrt(phi1**2 + new_vol1**2)
+        new_phi1 = (new_phi1**(-2) + 1/v)**(-1/2)
+
+        new_mu1 = mu1 + new_phi1**2 * self.g_func(phi2) * (outcome - e)
+
+        new_r1 = new_mu1 / GlickoRating.Q + 1500
+        new_rd1 = new_phi1 / GlickoRating.Q
 
         self.rs[t1] = new_r1
         self.rds[t1] = new_rd1
+        self.vols[t1] = new_vol1
 
     def update(self, match):
         self.add_non_existing(match)
@@ -141,18 +181,23 @@ class GlickoRating:
         self.last_game[t1] = match.start_time
         self.last_game[t2] = match.start_time
 
-    def g_func(self, rd):
-        return 1 / math.sqrt(1 + 3 * (GlickoRating.Q * rd)**2 / math.pi**2)
+    def g_func(self, phi):
+        return 1 / math.sqrt(1 + 3 * phi**2 / math.pi**2)
+
+    def f_func(self, x, delta, phi, v, sigma):
+        z = x**2 * (delta**2 - phi**2 - v - x**2) / (2 * (phi**2 + v + x**2)**2)
+        z = z - math.log(x**2 / sigma**2) / GlickoRating.TAU ** 2
+        return abs(z)
 
     def __str__(self):
         lst = []
         for k in self.rds.keys():
-            lst.append((self.rs[k], self.timeshift_rd(k, datetime.datetime.now(datetime.timezone.utc)), k))
+            lst.append((self.rs[k], self.timeshift_rd(k, datetime.datetime.now(datetime.timezone.utc)), self.vols[k], k))
         lst.sort(reverse=True)
 
         t = ""
         for l in lst:
-            t = "{}\n{:10.3f} {:10.3f}   {}".format(t, l[0], l[1], l[2])
+            t = "{}\n{:10.3f} {:10.3f} {:10.3f}  {}".format(t, l[0], l[1], l[2], l[3])
         return t
 
 class MatchList:

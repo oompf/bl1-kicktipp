@@ -1,6 +1,5 @@
 import datetime, dateutil.parser
-from scipy import stats
-from scipy.optimize import minimize
+from scipy.optimize import curve_fit
 import numpy as np
 import math
 import sys
@@ -57,22 +56,27 @@ class Match:
     def goal_sum(self):
         return self.result[0] + self.result[1]
 
-class LinearRegression:
+class ScalarRegression:
     def __init__(self):
         self.xs = []
         self.ys = []
 
-    def add(self, x, y):
+    def add(self, x, y, max_vals=int(SKIP_GAMES/1.5)):
         self.xs.append(x)
         self.ys.append(y)
 
-        if len(self.xs) >= SKIP_GAMES:
-            self.xs = self.xs[-SKIP_GAMES:]
-            self.ys = self.ys[-SKIP_GAMES:]
+        if len(self.xs) >= max_vals:
+            self.xs = self.xs[-max_vals:]
+            self.ys = self.ys[-max_vals:]
     
+    @staticmethod
+    def f_func(x, a, b):
+        return a * b**x
+
     def predict(self, x):
-        slope, intercept, _, _, _ = stats.linregress(self.xs, self.ys)
-        return intercept + slope * x
+        res = curve_fit(ScalarRegression.f_func, self.xs, self.ys, method='dogbox', bounds=[0, np.inf])
+        params = res[0]
+        return ScalarRegression.f_func(x, *params)
 
 class GlickoRating:
     # Konstanten
@@ -162,8 +166,8 @@ class MatchList:
         self.avg_goals = []
         self.home_advs = []
         self.rating = GlickoRating()
-        self.l1_predictor = LinearRegression()
-        self.l2_predictor = LinearRegression()
+        self.l1_predictor = ScalarRegression()
+        self.l2_predictor = ScalarRegression()
         self.reward_matrices = [[] for _ in range(0, 5)]
 
     def append(self, match):
@@ -222,7 +226,7 @@ class MatchList:
 
             # Benchmark
             if "--bench" in sys.argv:
-                if match.season < 2019 and match.season >= 2009:
+                if match.season == 2019: #< 2019 and match.season >= 2014:
                     e1 = self.rating.expect(match, self.home_advs[i])
                     var += (e1 -  match.outcome)**2
                     n += 1

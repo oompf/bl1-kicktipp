@@ -149,7 +149,7 @@ class GlickoRating:
         lst = []
         for k in self.rds.keys():
             lst.append((self.rs[k], self.timeshift_rd(k, datetime.datetime.now(datetime.timezone.utc)), k))
-        lst.sort(key=lambda l : l[1])
+        lst.sort(reverse=True)
 
         t = ""
         for l in lst:

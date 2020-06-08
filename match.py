@@ -177,12 +177,7 @@ class MatchList:
         # 1. Liste der Spiele chronologisch sortieren
         self.matches.sort(key = lambda m : m.start_time)
 
-        # 2. Heimvorteil berechnen
-        #finished_matches = list(filter(lambda m : m.is_finished, self.matches))
-        #home_factor = sum(map(lambda m : m.outcome, finished_matches)) / len(finished_matches)
-        #self.home_adv = math.log(1 / home_factor - 1) / GlickoRating.Q
-
-        # 3. Durchschnittliche erwartete Torzahl und Heimvorteil pro Spiel bestimmen
+        # 2. Durchschnittliche erwartete Torzahl und Heimvorteil pro Spiel bestimmen
         home_factors = []
 
         goal_sum = sum(map(lambda m : m.goal_sum(), self.matches[0:SKIP_GAMES]))  
@@ -207,11 +202,10 @@ class MatchList:
         for h_factor in home_factors:
             self.home_advs.append(math.log(1 / h_factor - 1) / GlickoRating.Q)
 
-
-        # 5. Matrizen berechnen
+        # 3. Matrizen berechnen
         self.calc_reward_matrices()
 
-        # 6. Glicko-Modell trainieren
+        # 4. Glicko-Modell trainieren
         bench = 0
         var = 0
         l1_diff = 0
@@ -313,18 +307,11 @@ class MatchList:
         return tips[-1]
 
     def predict_upcoming(self):
-        cnt = 0
         total_res = 0
         for i in range(0, len(self.matches)):
             match = self.matches[i]
             if match.is_finished:
-                continue
-
-        
-            if cnt >= 14:
-                break
-            cnt += 1
-            
+                continue            
 
             e1 = self.rating.expect(match, self.home_advs[i])
             e2 = 1 - e1
